@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Technical Interview Agent</title>
+  <meta name="description" content="Enterprise adaptive technical assessment powered by AI cohort intelligence.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Enterprise Compact Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a8 8 0 0 0-8 8c0 1.5.4 2.9 1.1 4.1L4 20l5.9-1.1C11.1 19.6 12.5 20 14 20a8 8 0 0 0 8-8 8 8 0 0 0-8-8z"/>
+            <path d="M9.5 9h.01"/><path d="M14.5 9h.01"/><path d="M9.5 13a3.5 3.5 0 0 0 5 0"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">AI Interview Agent</span>
+          <span class="brand-divider">/</span>
+          <span class="brand-subtitle">Adaptive Technical Assessment</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div class="status-badge" id="backend-status">
+          <span class="status-dot"></span>
+          <span class="status-text">AI Online</span>
+        </div>
+        <button id="btn-reset-session" class="btn btn-secondary btn-sm hidden">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          Change Candidate
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Viewport Area -->
+    <main class="main-content">
+      
+      <!-- SCREEN 1: Candidate Selection View -->
+      <section id="selection-screen" class="view-screen active">
+        <div class="screen-top-bar">
+          <div>
+            <h1 class="page-title">Select Candidate</h1>
+            <p class="page-description">Choose a candidate profile to launch a personalized technical evaluation session.</p>
+          </div>
+          <div class="search-wrapper">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input type="text" id="candidate-search" placeholder="Search by name or role...">
+          </div>
+        </div>
+
+        <div class="selection-grid-layout">
+          <!-- Left Column: Candidate List Cards -->
+          <div class="candidate-cards-scroll">
+            <div id="candidate-grid" class="candidate-grid">
+              <div class="skeleton-card"></div>
+              <div class="skeleton-card"></div>
+              <div class="skeleton-card"></div>
+            </div>
+          </div>
+
+          <!-- Right Column: Candidate Profile Inspector -->
+          <aside class="profile-inspector">
+            <div id="inspector-placeholder" class="inspector-placeholder">
+              <div class="placeholder-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              </div>
+              <h3>Select a Candidate</h3>
+              <p>Click any candidate card on the left to inspect their curriculum history and launch an assessment.</p>
+            </div>
+
+            <div id="inspector-content" class="inspector-content hidden">
+              <div class="inspector-profile-header">
+                <div class="avatar-circle lg" id="detail-avatar">EC</div>
+                <div class="profile-title-block">
+                  <h2 id="detail-name">Emily Chen</h2>
+                  <span class="role-badge" id="detail-role">AI Engineer</span>
+                </div>
+              </div>
+
+              <div class="profile-metrics-grid">
+                <div class="metric-item">
+                  <span class="metric-label">Experience</span>
+                  <span class="metric-val" id="detail-exp">6.0 Yrs</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">Education</span>
+                  <span class="metric-val" id="detail-edu">MS AI</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">Commit Days</span>
+                  <span class="metric-val" id="detail-commits">31 Days</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">First-Try Pass</span>
+                  <span class="metric-val highlight-green" id="detail-first-try">97%</span>
+                </div>
+              </div>
+
+              <div class="missions-section">
+                <span class="section-label">Cohort Missions Breakdown</span>
+                <div class="mission-pills">
+                  <div class="pill pill-mastered"><span id="count-mastered">0</span> Mastered</div>
+                  <div class="pill pill-struggled"><span id="count-struggled">0</span> Struggled</div>
+                  <div class="pill pill-failed"><span id="count-failed">0</span> Failed</div>
+                  <div class="pill pill-skipped"><span id="count-skipped">0</span> Skipped</div>
+                </div>
+              </div>
+
+              <div class="inspector-footer">
+                <button id="btn-start-interview" class="btn btn-primary btn-block">
+                  Start Technical Assessment
+                </button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- SCREEN 2: Live Assessment Interface -->
+      <section id="chat-screen" class="view-screen">
+        <div class="assessment-layout">
+          
+          <!-- Narrow Left Sidebar -->
+          <aside class="sidebar-panel">
+            <div class="sidebar-candidate-card">
+              <div class="avatar-circle md" id="chat-candidate-avatar">EC</div>
+              <div class="sidebar-candidate-info">
+                <h3 id="chat-candidate-name">Emily Chen</h3>
+                <span id="chat-candidate-role">AI Engineer • 6.0 Yrs</span>
+              </div>
+            </div>
+
+            <div class="sidebar-progress-card">
+              <div class="progress-header">
+                <span class="progress-title">Session Progress</span>
+                <span class="progress-count" id="chat-turn-count">Turn 0 of 10</span>
+              </div>
+              <div class="progress-bar-track">
+                <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%;"></div>
+              </div>
+              <div class="session-meta-row">
+                <span class="meta-label">Session ID</span>
+                <span class="meta-code" id="chat-session-id">session-123</span>
+              </div>
+              <div class="session-meta-row">
+                <span class="meta-label">Engine</span>
+                <span class="meta-val" id="chat-mode-badge">Mock LLM</span>
+              </div>
+            </div>
+
+            <div class="sidebar-guidance">
+              <span class="sidebar-section-title">Assessment Guidance</span>
+              <ul>
+                <li>Questions adapt dynamically to candidate answers.</li>
+                <li>Single focused question per turn.</li>
+                <li>Executive evaluation report rendered upon completion.</li>
+              </ul>
+            </div>
+          </aside>
+
+          <!-- Main Conversation Area -->
+          <div class="chat-main-panel">
+            <!-- Header Bar -->
+            <div class="chat-main-header">
+              <div class="interviewer-info">
+                <div class="ai-avatar">🤖</div>
+                <div>
+                  <span class="ai-title">AI Technical Interviewer</span>
+                  <span class="ai-subtitle">Adaptive Evaluation Protocol</span>
+                </div>
+              </div>
+              <div id="interview-status-tag" class="status-indicator-tag">
+                <span class="dot-active"></span>
+                <span>Interview In Progress</span>
+              </div>
+            </div>
+
+            <!-- Scrollable Message Timeline -->
+            <div id="chat-messages" class="chat-messages-scroll">
+              <!-- Dynamic message elements appended here -->
+            </div>
+
+            <!-- Message Composer / Input Area -->
+            <div class="composer-container">
+              <div id="completion-banner" class="completion-banner hidden">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                <span>Interview Concluded — See evaluation report below.</span>
+              </div>
+
+              <form id="chat-form" class="composer-form">
+                <textarea id="chat-input" placeholder="Type your technical response..." rows="2" required></textarea>
+                <button type="submit" id="btn-send-message" class="btn btn-primary btn-send">
+                  <span>Send</span>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                </button>
+              </form>
+            </div>
+
+            <!-- Final Executive Evaluation Report Panel -->
+            <div id="feedback-panel" class="evaluation-report-panel hidden">
+              <div class="report-header">
+                <div class="report-title-group">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                  <h2>Candidate Evaluation Report</h2>
+                </div>
+                <span class="report-tag">Final Assessment</span>
+              </div>
+
+              <!-- Executive Technical Summary -->
+              <div class="report-summary-block">
+                <span class="report-section-label">Executive Technical Summary</span>
+                <p id="fb-summary">Candidate evaluation summary...</p>
+              </div>
+
+              <div class="report-grid">
+                <!-- Strengths -->
+                <div class="report-card card-strengths">
+                  <span class="card-header-label">Technical Strengths</span>
+                  <ul id="fb-strengths-list"></ul>
+                </div>
+
+                <!-- Knowledge Gaps -->
+                <div class="report-card card-gaps">
+                  <span class="card-header-label">Knowledge Gaps</span>
+                  <ul id="fb-gaps-list"></ul>
+                </div>
+              </div>
+
+              <!-- Recommended Next Steps -->
+              <div class="report-card card-next">
+                <span class="card-header-label">Recommended Next Steps</span>
+                <ul id="fb-next-list"></ul>
+              </div>
+
+              <div class="report-footer">
+                <button id="btn-restart-after-feedback" class="btn btn-secondary">Select Another Candidate</button>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
