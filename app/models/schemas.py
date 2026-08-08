@@ -47,11 +47,28 @@ class InterviewRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
+class AssessmentFocus(BaseModel):
+    topic: str = Field(..., description="High-level assessment focus topic")
+    reason: str = Field(..., description="Safe, high-level rationale derived from curriculum or profile")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class SkillEvaluation(BaseModel):
+    """Per-turn skill assessment derived from candidate's actual answer."""
+    module: str = Field(..., description="Curriculum module name being assessed this turn")
+    status: str = Field(..., description="Evidence-based status: Strong, Good, Developing, Needs Attention")
+
+    model_config = ConfigDict(extra="allow")
+
+
 class FeedbackResponse(BaseModel):
     summary: str = Field(..., description="Concise overall summary of interview performance")
     strengths: List[str] = Field(default_factory=list, description="Key technical strengths demonstrated")
     gaps: List[str] = Field(default_factory=list, description="Knowledge gaps or areas needing improvement")
     next: List[str] = Field(default_factory=list, description="Recommended next steps and study areas")
+    skillProfile: Optional[Dict[str, str]] = Field(default=None, description="Qualitative technical skill levels across curriculum modules")
+    disposition: Optional[str] = Field(default=None, description="Assessment recommendation: Strong Fit, Consider, or Needs Development")
 
     model_config = ConfigDict(extra="allow")
 
@@ -60,5 +77,9 @@ class InterviewResponse(BaseModel):
     reply: str
     done: bool
     feedback: Optional[FeedbackResponse] = None
+    assessmentFocus: Optional[AssessmentFocus] = None
+    skillEvaluation: Optional[SkillEvaluation] = Field(default=None, description="Per-turn skill assessment from current candidate answer")
+    currentTopicModule: Optional[str] = Field(default=None, description="The curriculum module name being assessed this turn — single source of truth for sidebar labels")
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+

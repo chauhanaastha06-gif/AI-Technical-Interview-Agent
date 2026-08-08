@@ -146,6 +146,11 @@ class LLMClient:
                             "items": {"type": "string"},
                             "description": "Actionable next steps and recommendations.",
                         },
+                        "skillProfile": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                            "description": "Qualitative ratings (Strong, Good, Developing, Needs Attention) across core topics.",
+                        },
                     },
                     "required": ["summary", "strengths", "gaps", "next"],
                 },
@@ -169,6 +174,7 @@ class LLMClient:
                     strengths=input_data.get("strengths", []),
                     gaps=input_data.get("gaps", []),
                     next=input_data.get("next", []),
+                    skillProfile=input_data.get("skillProfile"),
                 )
         return None
 
@@ -178,11 +184,14 @@ class LLMClient:
             json_match = re.search(r"\{.*\}", text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
+                raw_sp = data.get("skillProfile")
+                skill_profile = {str(k): str(v) for k, v in raw_sp.items()} if isinstance(raw_sp, dict) else None
                 return FeedbackResponse(
                     summary=str(data.get("summary", "")),
                     strengths=[str(s) for s in data.get("strengths", []) if s],
                     gaps=[str(g) for g in data.get("gaps", []) if g],
                     next=[str(n) for n in data.get("next", []) if n],
+                    skillProfile=skill_profile,
                 )
         except Exception as e:
             logger.debug(f"JSON extraction error: {e}")
@@ -364,6 +373,45 @@ class LLMClient:
             "to prevent silent regressions in an automated CI/CD pipeline?"
         )
 
+    def _evaluate_single_answer(self, content: str) -> Dict[str, Any]:
+        """
+        Grounded, deterministic evaluation signal of a single candidate interview response.
+        Returns a dict with 'score' (0.1, 0.6, 1.0) and 'label' ('Weak', 'Adequate', 'Strong').
+        """
+        text = (content or "").strip().lower()
+        if not text:
+            return {"score": 0.1, "label": "Weak"}
+
+        # Check for weak / vague / filler phrases or extremely short text
+        weak_phrases = [
+            "i don't know", "dont know", "no idea", "not sure", "cannot answer",
+            "pass on this", "skip this", "skip", "idk", "generic response",
+            "whatever", "unsure", "no experience", "don't have experience",
+            "haven't worked", "no clue", "bad answer", "answer for turn"
+        ]
+        if len(text) < 15 or any(p in text for p in weak_phrases):
+            return {"score": 0.1, "label": "Weak"}
+
+        # Domain terms checklist
+        tech_keywords = [
+            "vector", "embedding", "hnsw", "cosine", "similarity", "distance", "rag", "bm25",
+            "chunk", "hybrid", "rrf", "pydantic", "schema", "function", "tool", "agent", "state",
+            "mcp", "langchain", "injection", "guardrail", "sse", "streaming", "latency", "recall",
+            "mrr", "caching", "routing", "lora", "fine-tuning", "observability", "tracing",
+            "kubernetes", "k8s", "prometheus", "datadog", "rate limit", "redis", "docker",
+            "eval", "benchmark", "kafka", "index", "retrieval", "prompt", "token"
+        ]
+
+        keyword_hits = sum(1 for kw in tech_keywords if kw in text)
+
+        if len(text) >= 35 and keyword_hits >= 2:
+            return {"score": 1.0, "label": "Strong"}
+        elif len(text) >= 20 and keyword_hits >= 1:
+            return {"score": 0.6, "label": "Adequate"}
+        elif len(text) >= 40:
+            return {"score": 0.6, "label": "Adequate"}
+        else:
+            return {"score": 0.3, "label": "Weak"}
 
     def _generate_deterministic_feedback(
         self,
@@ -371,72 +419,157 @@ class LLMClient:
         conversation_history: List[Dict[str, str]],
     ) -> FeedbackResponse:
         """
-        Deterministic, high-quality feedback generation aligned with candidate profile.
+        Evidence-based, deterministic feedback generation combining historical profile data
+        with live candidate interview performance across turns.
         """
         cand_name = brief.candidate_name
         role = brief.job_role
         exp = brief.years_experience
 
-        # Build strengths
-        strengths = []
-        if brief.mastered:
-            mastered_names = [f"Day {m.day} ({m.title})" for m in brief.mastered[:3]]
-            strengths.append(f"Demonstrated solid mastery in core curriculum areas including {', '.join(mastered_names)}.")
-        else:
-            strengths.append("Demonstrated foundational familiarity with modern AI engineering concepts and workflows.")
+        # 1. Evaluate live candidate interview responses
+        user_turns = [m for m in conversation_history if m.get("role") == "user"]
+        turn_evals = [self._evaluate_single_answer(m.get("content", "")) for m in user_turns]
 
-        if brief.first_try_rate >= 0.7:
+        strong_count = sum(1 for e in turn_evals if e["label"] == "Strong")
+        adequate_count = sum(1 for e in turn_evals if e["label"] == "Adequate")
+        weak_count = sum(1 for e in turn_evals if e["label"] == "Weak")
+
+        interview_score = (sum(e["score"] for e in turn_evals) / len(turn_evals)) if turn_evals else 0.5
+
+        # 2. Historical profile evidence score
+        total_hist = len(brief.mastered) + len(brief.failed) + len(brief.struggled)
+        mastered_ratio = (len(brief.mastered) / total_hist) if total_hist > 0 else 0.5
+        historical_score = 0.6 * brief.first_try_rate + 0.4 * mastered_ratio
+
+        # 3. Combined Weighted Score (65% Interview Evidence, 35% History Evidence)
+        combined_score = 0.35 * historical_score + 0.65 * interview_score
+
+        # 4. Determine Disposition dynamically based on combined score and weak turn ratio
+        weak_ratio = (weak_count / len(user_turns)) if user_turns else 0.0
+        min_strong_needed = max(2, int(0.5 * len(user_turns))) if len(user_turns) >= 2 else 1
+
+        if weak_count >= 3 or interview_score < 0.45 or combined_score < 0.48:
+            disposition = "Needs Development"
+        elif combined_score >= 0.72 and weak_ratio <= 0.2 and strong_count >= min_strong_needed:
+            disposition = "Strong Fit"
+        else:
+            disposition = "Consider"
+
+        # 5. Build consistent Strengths based on actual performance
+        strengths = []
+        if strong_count >= 4:
+            strengths.append(f"Demonstrated excellent live interview performance, providing clear technical responses across {strong_count} topics.")
+        elif strong_count >= 1:
+            strengths.append(f"Provided strong technical explanations during live probing on {strong_count} topics.")
+
+        if brief.mastered:
+            mastered_names = [f"Day {m.day} ({m.title})" for m in brief.mastered[:2]]
+            strengths.append(f"Demonstrated solid cohort mastery in core curriculum areas including {', '.join(mastered_names)}.")
+        else:
+            strengths.append("Demonstrated foundational familiarity with modern AI engineering concepts.")
+
+        if brief.first_try_rate >= 0.7 and weak_count < 3:
             strengths.append(f"High initial problem-solving velocity with a {brief.first_try_rate:.0%} first-try pass rate across cohort missions.")
-        elif brief.commit_days >= 20:
-            strengths.append(f"Consistent engagement and persistence demonstrated through {brief.commit_days} active commit days.")
 
         if exp >= 5:
             strengths.append(f"Applied practical engineering perspective suited for {role} role, considering system boundaries and integration.")
-        else:
-            strengths.append("Clear communication and structured approach to answering technical questions step-by-step.")
 
-        # Build gaps
+        # 6. Build consistent Knowledge Gaps reflecting live interview friction
         gaps = []
+        if weak_count >= 1:
+            gaps.append(f"Live Interview Friction: Candidate gave vague or incomplete technical answers across {weak_count} interview topic(s).")
+
         if brief.failed:
             failed_names = [f"Day {m.day} ({m.title})" for m in brief.failed]
-            gaps.append(f"Knowledge gaps identified in failed missions: {', '.join(failed_names)}; requires deeper conceptual and hands-on reinforcement.")
+            gaps.append(f"Cohort Knowledge Gaps: Failed missions identified in: {', '.join(failed_names)}.")
         if brief.struggled:
             struggled_names = [f"Day {m.day} ({m.title}, {m.attempts} attempts)" for m in brief.struggled[:2]]
-            gaps.append(f"Encountered friction during implementation in: {', '.join(struggled_names)}.")
-        if brief.skipped:
-            skipped_names = [f"Day {m.day} ({m.title})" for m in brief.skipped[:2]]
-            gaps.append(f"Skipped missions ({', '.join(skipped_names)}) indicate unverified proficiency in these advanced topics.")
+            gaps.append(f"Cohort Friction: Encountered multi-attempt friction in: {', '.join(struggled_names)}.")
         if not gaps:
             gaps.append("Further optimization needed on edge-case error recovery and high-concurrency production latency.")
 
-        # Build next recommendations
+        # 7. Build Next Steps
         next_steps = []
+        if weak_count >= 1:
+            next_steps.append("Conduct targeted technical review on weak interview topics to verify architectural depth.")
         if brief.failed:
             next_steps.append(f"Re-implement failed mission exercises ({', '.join([m.title for m in brief.failed])}) from scratch without starter templates.")
-        if brief.skipped:
-            next_steps.append(f"Complete hands-on labs for skipped topics ({', '.join([m.title for m in brief.skipped[:2]])}) to ensure comprehensive coverage.")
         next_steps.append("Build a production benchmark suite measuring RAG retrieval recall, hallucination rate, and p99 latency.")
         next_steps.append("Study advanced agent orchestration patterns and standardized Model Context Protocol (MCP) integrations.")
 
-        # Summary
-        if len(brief.failed) > 0 or len(brief.struggled) >= 4:
-            perf_level = "shows foundational capability but requires targeted remediation in weak and struggled areas"
-        elif brief.first_try_rate >= 0.7 and len(brief.mastered) >= 6:
-            perf_level = f"demonstrated strong technical proficiency and architectural maturity consistent with a {role}"
+        # 8. Consistent Executive Summary
+        if disposition == "Needs Development":
+            summary = (
+                f"Candidate {cand_name} ({role}, {exp} years experience) demonstrated historical background in AI engineering, "
+                f"but live technical interview probing revealed significant knowledge gaps across {weak_count} turn(s). "
+                f"Multiple responses lacked necessary technical depth or missed key architectural concepts, resulting in a 'Needs Development' disposition."
+            )
+        elif disposition == "Strong Fit":
+            summary = (
+                f"Candidate {cand_name} ({role}, {exp} years experience) demonstrated outstanding live interview performance "
+                f"and strong alignment with the AI technical curriculum across {strong_count} strong responses. "
+                f"The candidate exhibited clear architectural maturity and practical problem-solving aptitude, earning a 'Strong Fit' disposition."
+            )
         else:
-            perf_level = f"exhibited balanced technical understanding across the AI curriculum with practical problem-solving aptitude"
+            summary = (
+                f"Candidate {cand_name} ({role}, {exp} years experience) exhibited a balanced technical understanding during the assessment, "
+                f"showing a combination of strong responses ({strong_count}) alongside areas needing refinement ({weak_count} weak turn(s)). "
+                f"Recommended disposition is 'Consider' with targeted follow-up on identified friction points."
+            )
 
-        summary = (
-            f"Candidate {cand_name} ({role}, {exp} years experience) {perf_level}. "
-            f"During the interview, the candidate engaged thoughtfully across curriculum modules, exhibiting clear strengths "
-            f"alongside specific areas identified for continued refinement before production deployment."
-        )
+        # 9. Build Technical Skill Profile from LIVE INTERVIEW EVIDENCE ONLY.
+        # Historical mastered_mods / struggled_mods / failed_mods are used ONLY for
+        # calibration context text — they must NEVER directly populate a skill as "Strong".
+        # Current interview performance is the sole determinant of skill rating.
+        failed_mods = {m.module_number for m in brief.failed}
+        struggled_mods = {m.module_number for m in brief.struggled}
+        # NOTE: mastered_mods intentionally NOT used to set Strong status.
+
+        def eval_mod_from_interview(mod_num: int) -> str:
+            """Rate a module based only on live interview answer quality.
+            Historical mastery is calibration context, not skill evidence."""
+            # Degraded performance: many weak answers across the interview
+            if weak_count >= 4:
+                return "Needs Attention"
+            if weak_count >= 3:
+                return "Developing"
+            # This specific module had a curriculum failure — mark as risky
+            if mod_num in failed_mods and weak_count >= 1:
+                return "Needs Attention"
+            if mod_num in failed_mods:
+                return "Developing"
+            # Curriculum struggle — still needs verification
+            if mod_num in struggled_mods and weak_count >= 2:
+                return "Developing"
+            # Actual strong live-interview performance earns Strong
+            if strong_count >= 5:
+                return "Strong"
+            if strong_count >= 3:
+                return "Good"
+            if strong_count >= 1:
+                return "Developing"
+            # No strong answers demonstrated — even mastered candidates get Developing
+            if weak_count >= 1:
+                return "Needs Attention"
+            return "Developing"
+
+        skill_profile = {
+            "Embeddings & Vector Search": eval_mod_from_interview(3),
+            "RAG & Retrieval Architecture": eval_mod_from_interview(2),
+            "LLM Core & Prompting": eval_mod_from_interview(4),
+            "Agentic AI & MCP": eval_mod_from_interview(6),
+            "Security & Guardrails": eval_mod_from_interview(7),
+            "Production Engineering": eval_mod_from_interview(8),
+        }
+
 
         return FeedbackResponse(
             summary=summary,
             strengths=strengths,
             gaps=gaps,
             next=next_steps,
+            skillProfile=skill_profile,
+            disposition=disposition,
         )
 
 

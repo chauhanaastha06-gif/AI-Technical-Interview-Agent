@@ -77,3 +77,7 @@ class InterviewState:
     feedback: Optional[FeedbackResponse] = None
     created_at: float = 0.0
     updated_at: float = 0.0
+    # Per-turn skill evaluations: [{module: str, status: str}, ...]
+    # Each entry corresponds to one candidate answer turn.
+    turn_skill_evals: List[Dict[str, str]] = field(default_factory=list)
+

@@ -77,6 +77,12 @@ class SessionManager:
         state.updated_at = time.time()
         return state.turn_count
 
+    def append_skill_eval(self, session_id: str, eval_dict: dict) -> None:
+        """Append a per-turn skill evaluation {module, status} to the session state."""
+        state = self.get(session_id)
+        state.turn_skill_evals.append(eval_dict)
+        state.updated_at = time.time()
+
     def mark_done(self, session_id: str, feedback: Optional[FeedbackResponse] = None) -> InterviewState:
         state = self.get(session_id)
         state.done = True
