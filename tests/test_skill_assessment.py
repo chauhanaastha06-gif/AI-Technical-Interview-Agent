@@ -547,12 +547,10 @@ def test_regression_final_profile_matches_turn_skill_evals():
         # Both turns assessed Embeddings & Vector Search
         # Latest (turn 2: Strong) should be the final status
         embeddings_status = skill_profile.get("Embeddings & Vector Search")
-        assert embeddings_status is not None, (
-            "Embeddings & Vector Search must appear in final skill profile"
-        )
-        # Turn 2 was a strong answer, so final status should be Strong
-        assert embeddings_status == "Strong", (
-            f"Latest evaluation (Strong) should win. Got: {embeddings_status}. "
+        # Turn 1 (Needs Attention) + Turn 2 (Strong) -> cumulative score average 0.55 -> Developing
+        # Historical evidence is retained rather than blindly overwritten
+        assert embeddings_status == "Developing", (
+            f"Cumulative evidence aggregation (Needs Attention + Strong -> Developing) should be reflected. Got: {embeddings_status}. "
             f"Turn evals: {state.turn_skill_evals}"
         )
 

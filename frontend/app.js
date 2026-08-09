@@ -22,16 +22,24 @@ document.addEventListener('DOMContentLoaded', () => {
     { id: 'm7', name: 'Production Engineering' },
   ];
 
-  // Timeline step labels — indexed by turn order (displayed in sidebar)
+  // Timeline step labels — canonical module names matching CURRICULUM_MODULES
   const TIMELINE_STEPS = [
     'Interview Initialized',
     'Embeddings & Vector Search',
-    'LLM Integration & Prompting',
-    'Agents & Tool Use',
+    'RAG & Retrieval Architecture',
+    'LLM Core & Prompting',
+    'Agentic AI & MCP',
     'Security & Guardrails',
     'Evaluation & Benchmarks',
-    'Production & Capstone',
+    'Production Engineering',
   ];
+
+  function normalizeModuleName(name) {
+    if (!name) return '';
+    const cleaned = name.trim().replace(/\s+/g, ' ');
+    const found = CURRICULUM_MODULES.find(m => m.name.toLowerCase() === cleaned.toLowerCase());
+    return found ? found.name : cleaned;
+  }
 
   // State Management
   let candidates = [];
@@ -153,22 +161,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Apply a skill evaluation received from the backend to the live skill map.
-  // Only updates the specific module affected by the current turn.
-  function applySkillEvaluation(skillEvaluation) {
-    if (!skillEvaluation || !skillEvaluation.module || !skillEvaluation.status) return;
-    const { module, status } = skillEvaluation;
+  // Apply skill evaluations received from backend to the live skill map.
+  function applySkillEvaluation(skillEvaluation, cumulativeSkillMap) {
+    if (cumulativeSkillMap && typeof cumulativeSkillMap === 'object') {
+      Object.keys(cumulativeSkillMap).forEach(rawMod => {
+        const canonicalMod = normalizeModuleName(rawMod);
+        if (canonicalMod in liveSkillMap) {
+          liveSkillMap[canonicalMod] = cumulativeSkillMap[rawMod];
+        }
+      });
+      return;
+    }
 
-    // Only update if the module exists in our map
-    if (module in liveSkillMap) {
-      // Upgrade rule: never downgrade a skill if it's already been rated higher
-      const currentStatus = liveSkillMap[module];
-      const RANK = { 'Not Assessed': 0, 'Needs Attention': 1, 'Developing': 2, 'Good': 3, 'Strong': 4 };
-      const currentRank = RANK[currentStatus] ?? 0;
-      const newRank = RANK[status] ?? 0;
-      // Take the higher rating if the module has been assessed multiple times
-      // (But allow degradation if candidate gives a weak answer after a good one — take the LATEST)
-      liveSkillMap[module] = status;
+    if (!skillEvaluation || !skillEvaluation.module || !skillEvaluation.status) return;
+    const rawModule = skillEvaluation.module;
+    const status = skillEvaluation.cumulative_status || skillEvaluation.status;
+    const canonicalModule = normalizeModuleName(rawModule);
+
+    if (canonicalModule in liveSkillMap) {
+      liveSkillMap[canonicalModule] = status;
     }
   }
 
@@ -425,36 +436,33 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Feature 3: SHOW ADAPTIVE INTERVIEW EVENTS IN TIMELINE
-  // Uses currentTopicModule from API to keep timeline consistent with actual question.
+  // Uses currentTopicModule from API for active state, and liveSkillMap evidence for completion.
   function updateTimelineUI(turns, topicModule) {
     const timelineContainer = document.getElementById('interview-timeline');
     if (!timelineContainer) return;
 
-    // Map module name to timeline step index
-    const MODULE_TO_STEP = {
-      'Embeddings & Vector Search': 1,
-      'RAG & Retrieval Architecture': 1,
-      'LLM Core & Prompting': 2,
-      'Agentic AI & MCP': 3,
-      'Security & Guardrails': 4,
-      'Evaluation & Benchmarks': 5,
-      'Production Engineering': 6,
-    };
-
-    // Active step from module name (API-driven), fallback to turn-based
-    let activeStep = 0;
-    if (turns === 0) {
-      activeStep = 0; // "Interview Initialized"
-    } else if (topicModule && MODULE_TO_STEP[topicModule] !== undefined) {
-      activeStep = MODULE_TO_STEP[topicModule];
-    } else {
-      activeStep = Math.min(turns, TIMELINE_STEPS.length - 1);
-    }
+    const activeNormModule = normalizeModuleName(topicModule);
 
     timelineContainer.innerHTML = TIMELINE_STEPS.map((stepLabel, idx) => {
       let cls = '';
-      if (idx < activeStep) cls = 'completed';
-      else if (idx === activeStep) cls = 'active';
+
+      if (idx === 0) {
+        // Step 0: Interview Initialized
+        if (turns === 0) {
+          cls = 'active';
+        } else {
+          cls = 'completed';
+        }
+      } else {
+        const isStepActive = (turns > 0 && activeNormModule === stepLabel);
+        const isStepAssessed = (liveSkillMap[stepLabel] && liveSkillMap[stepLabel] !== 'Not Assessed');
+
+        if (isStepActive) {
+          cls = 'active';
+        } else if (isStepAssessed) {
+          cls = 'completed';
+        }
+      }
 
       return `
         <div class="timeline-step ${cls}">
@@ -514,10 +522,8 @@ document.addEventListener('DOMContentLoaded', () => {
       // 5. Remove thinking indicator
       removeThinkingIndicator();
 
-      // 6. Apply skill evaluation from the answer just given
-      if (data.skillEvaluation) {
-        applySkillEvaluation(data.skillEvaluation);
-      }
+      // 6. Apply skill evaluation & cumulative skill map from answer just given
+      applySkillEvaluation(data.skillEvaluation, data.cumulativeSkillMap);
 
       // 7. Update turn count and topic module
       const newTurnCount = currentTurnCount + 1;

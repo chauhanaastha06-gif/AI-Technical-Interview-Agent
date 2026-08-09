@@ -3,7 +3,13 @@ import re
 from typing import List, Dict, Optional, Any
 from app.config import settings
 from app.models.domain import InterviewBrief, MissionStatus
-from app.models.schemas import FeedbackResponse
+from app.models.schemas import FeedbackResponse, AnswerEvaluationOutput, NextQuestionOutput
+from app.services.prompt_builder import (
+    build_system_prompt,
+    build_feedback_prompt,
+    build_answer_evaluation_prompt,
+    build_adaptive_question_prompt,
+)
 from app.utils.logging import logger
 
 try:
@@ -11,6 +17,198 @@ try:
     HAS_ANTHROPIC_PKG = True
 except ImportError:
     HAS_ANTHROPIC_PKG = False
+
+
+class AdaptiveGenerationError(Exception):
+    """Raised when adaptive question generation fails validation or LLM call fails."""
+    pass
+
+
+class EvaluationGenerationError(Exception):
+    """Raised when structured answer evaluation fails validation or LLM call fails."""
+    pass
+
+
+def is_unknown_answer(candidate_answer: str) -> bool:
+    """
+    Normalizes candidate answer and deterministically detects unknown/weak/vague phrases.
+    Prevents calling LLM unnecessarily and guarantees NO positive validation for unknown answers.
+    """
+    text = (candidate_answer or "").strip().lower()
+    if not text:
+        return True
+
+    # Normalize apostrophes, punctuation, and repeated spaces
+    text = re.sub(r"[''’`]", "", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if not text or len(text) < 4:
+        return True
+
+    unknown_phrases = [
+        "i dont know", "dont know", "no idea", "not sure", "im not sure",
+        "i am not sure", "i have no idea", "cannot answer", "cant answer",
+        "unable to answer", "pass on this", "skip this", "skip", "idk",
+        "generic response", "whatever", "unsure", "no experience",
+        "dont have experience", "havent worked", "no clue", "bad answer"
+    ]
+
+    for phrase in unknown_phrases:
+        if phrase in text:
+            return True
+
+    return False
+
+
+def calculate_overall_score(
+    correctness: float,
+    relevance: float,
+    completeness: float,
+    depth: float,
+    specificity: float,
+    practical_reasoning: float,
+    clarity: float,
+) -> float:
+    """
+    Calculates weighted overall score from 7 technical quality dimensions:
+    - Correctness: 30%
+    - Relevance: 15%
+    - Completeness: 15%
+    - Technical Depth: 15%
+    - Technical Specificity: 10%
+    - Practical Reasoning: 10%
+    - Clarity: 5%
+    """
+    score = (
+        0.30 * max(0.0, min(1.0, correctness)) +
+        0.15 * max(0.0, min(1.0, relevance)) +
+        0.15 * max(0.0, min(1.0, completeness)) +
+        0.15 * max(0.0, min(1.0, depth)) +
+        0.10 * max(0.0, min(1.0, specificity)) +
+        0.10 * max(0.0, min(1.0, practical_reasoning)) +
+        0.05 * max(0.0, min(1.0, clarity))
+    )
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def calibrate_status(
+    overall_score: float,
+    correctness: float,
+    relevance: float,
+    completeness: float,
+    depth: float,
+    specificity: float,
+    candidate_answer: str = "",
+) -> str:
+    """
+    Calibrates status from overall score with quality gates:
+    - 0.85-1.00 -> Strong
+    - 0.65-0.849 -> Good
+    - 0.40-0.649 -> Developing
+    - 0.00-0.399 -> Needs Attention
+
+    Quality Gates:
+    1. correctness < 0.70 -> max status = Developing
+    2. relevance < 0.60 -> max status = Developing
+    3. completeness < 0.60 -> max status = Good
+    4. depth < 0.50 -> max status = Good (depth < 0.40 -> max status = Developing)
+    5. correctness < 0.50 (misconceptions) -> max status = Developing
+    6. shallow/keyword dump (depth < 0.45 or specificity < 0.45) -> max status = Good (or Developing)
+    7. unknown answer -> Needs Attention
+    """
+    if is_unknown_answer(candidate_answer):
+        return "Needs Attention"
+
+    if overall_score >= 0.85:
+        status = "Strong"
+    elif overall_score >= 0.65:
+        status = "Good"
+    elif overall_score >= 0.40:
+        status = "Developing"
+    else:
+        status = "Needs Attention"
+
+    # Quality Gates Enforcement
+    if correctness < 0.70 and status in ["Strong", "Good"]:
+        status = "Developing"
+
+    if relevance < 0.60 and status in ["Strong", "Good"]:
+        status = "Developing"
+
+    if completeness < 0.60 and status == "Strong":
+        status = "Good"
+
+    if depth < 0.40 and status in ["Strong", "Good"]:
+        status = "Developing"
+    elif depth < 0.50 and status == "Strong":
+        status = "Good"
+
+    if (depth < 0.45 or specificity < 0.45) and status == "Strong":
+        status = "Good"
+
+    return status
+
+
+def normalize_question_text(text: str) -> str:
+    """Normalize question text for duplicate detection."""
+    text = (text or "").strip().lower()
+    text = re.sub(r"[^\w\s]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def validate_next_question_output(
+    output: NextQuestionOutput,
+    allowed_modules: List[str],
+    asked_questions: List[str],
+    previous_eval: Optional[Dict] = None,
+    previous_answer: str = "",
+) -> NextQuestionOutput:
+    """
+    Validates NextQuestionOutput against business constraints:
+    1. module in allowed_modules
+    2. difficulty in ['easy', 'medium', 'hard']
+    3. question not duplicate
+    4. exactly one question (<= 1 question mark)
+    5. sanitizes neutral_transition against positive validation for weak/unknown answers
+    """
+    # 1. Module validation
+    if output.module not in allowed_modules:
+        raise ValueError(f"Generated module '{output.module}' is not in allowed curriculum modules: {allowed_modules}")
+
+    # 2. Difficulty validation
+    if output.difficulty.lower() not in ["easy", "medium", "hard"]:
+        raise ValueError(f"Generated difficulty '{output.difficulty}' must be easy, medium, or hard")
+
+    # 3. Duplicate question validation
+    norm_q = normalize_question_text(output.question)
+    norm_asked = [normalize_question_text(q) for q in asked_questions or []]
+    if norm_q in norm_asked:
+        raise ValueError("Generated question is a duplicate of a previously asked question.")
+
+    # 4. Single question validation (max 1 question mark)
+    q_mark_count = output.question.count("?")
+    if q_mark_count > 1:
+        raise ValueError(f"Generated output contains multiple questions ({q_mark_count} question marks). Must be exactly one.")
+
+    # 5. Positive phrase sanitization
+    POSITIVE_PHRASES = [
+        "that makes sense", "good explanation", "great answer", "excellent",
+        "good point", "exactly", "absolutely", "thats correct", "that's correct",
+        "that’s correct", "well said", "nice"
+    ]
+    trans_lower = (output.neutral_transition or "").lower()
+    prev_status = (previous_eval.get("status") if previous_eval else "")
+    is_weak = prev_status in ["Needs Attention", "Developing"] or is_unknown_answer(previous_answer)
+
+    if is_weak:
+        if any(phrase in trans_lower for phrase in POSITIVE_PHRASES):
+            logger.warning(f"Sanitizing positive transition phrase '{output.neutral_transition}' for weak/unknown answer.")
+            output.neutral_transition = "Understood. Let's move on."
+
+    return output
+
 
 
 class LLMClient:
@@ -118,6 +316,288 @@ class LLMClient:
 
         # 3. Deterministic fallback feedback
         return self._generate_deterministic_feedback(brief, conversation_history)
+
+    def evaluate_answer_structured(
+        self,
+        module: str,
+        question_asked: str,
+        candidate_answer: str,
+        job_role: str = "Software Engineer",
+        years_experience: float = 0.0,
+        difficulty: str = "medium",
+    ) -> AnswerEvaluationOutput:
+        """
+        Evaluates candidate's answer across 7 technical quality dimensions using structured LLM tool output or deterministic fallback.
+        """
+        # 1. Deterministic unknown answer check (NO LLM CALL, NO POSITIVE VALIDATION)
+        if is_unknown_answer(candidate_answer):
+            logger.info(f"Deterministic unknown answer detected for module '{module}': '{candidate_answer}' -> Needs Attention")
+            return AnswerEvaluationOutput(
+                module=module,
+                status="Needs Attention",
+                score=0.1,
+                correctness_score=0.1,
+                relevance_score=0.1,
+                completeness_score=0.1,
+                depth_score=0.1,
+                specificity_score=0.1,
+                practical_reasoning_score=0.1,
+                clarity_score=0.1,
+                overall_score=0.1,
+                difficulty=difficulty,
+                reasoning_summary="Candidate indicated lack of knowledge or gave a minimal response.",
+                knowledge_gaps=["Candidate did not demonstrate technical understanding of this topic."],
+            )
+
+        # 2. Call Anthropic Structured Evaluation if client available
+        if not self.is_mock and self._client:
+            try:
+                eval_output = self._call_anthropic_structured_evaluation(
+                    module=module,
+                    question_asked=question_asked,
+                    candidate_answer=candidate_answer,
+                    job_role=job_role,
+                    years_experience=years_experience,
+                    difficulty=difficulty,
+                )
+                if eval_output:
+                    return eval_output
+            except Exception as e:
+                logger.warning(f"Structured evaluation attempt failed: {e}. Retrying with strict instruction...")
+                try:
+                    eval_output = self._retry_anthropic_structured_evaluation(
+                        module=module,
+                        question_asked=question_asked,
+                        candidate_answer=candidate_answer,
+                        job_role=job_role,
+                        years_experience=years_experience,
+                        difficulty=difficulty,
+                    )
+                    if eval_output:
+                        return eval_output
+                except Exception as retry_err:
+                    logger.error(f"Retry structured evaluation failed: {retry_err}.")
+
+        # 3. Fallback evaluation via _evaluate_single_answer heuristic
+        return self._evaluate_single_answer_dimensional(
+            module=module,
+            question_asked=question_asked,
+            candidate_answer=candidate_answer,
+            difficulty=difficulty,
+        )
+
+    def _call_anthropic_structured_evaluation(
+        self,
+        module: str,
+        question_asked: str,
+        candidate_answer: str,
+        job_role: str,
+        years_experience: float,
+        difficulty: str = "medium",
+    ) -> Optional[AnswerEvaluationOutput]:
+        prompt = build_answer_evaluation_prompt(
+            module=module,
+            question_asked=question_asked,
+            candidate_answer=candidate_answer,
+            job_role=job_role,
+            years_experience=years_experience,
+            difficulty=difficulty,
+        )
+
+        tools = [
+            {
+                "name": "evaluate_candidate_answer",
+                "description": "Submit multi-dimensional structured technical evaluation of candidate answer.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "module": {"type": "string", "description": "Curriculum module being evaluated"},
+                        "correctness_score": {"type": "number", "description": "Technical correctness (0.0 to 1.0)"},
+                        "relevance_score": {"type": "number", "description": "Question relevance (0.0 to 1.0)"},
+                        "completeness_score": {"type": "number", "description": "Answer completeness (0.0 to 1.0)"},
+                        "depth_score": {"type": "number", "description": "Technical depth and why/how understanding (0.0 to 1.0)"},
+                        "specificity_score": {"type": "number", "description": "Technical specificity, algorithms, or mechanics (0.0 to 1.0)"},
+                        "practical_reasoning_score": {"type": "number", "description": "Practical engineering reasoning (0.0 to 1.0)"},
+                        "clarity_score": {"type": "number", "description": "Clarity of explanation (0.0 to 1.0)"},
+                        "reasoning_summary": {"type": "string", "description": "Non-spoiler technical rationale"},
+                        "knowledge_gaps": {"type": "array", "items": {"type": "string"}, "description": "Identified knowledge gaps"},
+                    },
+                    "required": [
+                        "module", "correctness_score", "relevance_score", "completeness_score",
+                        "depth_score", "specificity_score", "practical_reasoning_score",
+                        "clarity_score", "reasoning_summary"
+                    ],
+                },
+            }
+        ]
+
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=600,
+            temperature=0.2,
+            messages=[{"role": "user", "content": prompt}],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "evaluate_candidate_answer"},
+        )
+
+        for block in response.content:
+            if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == "evaluate_candidate_answer":
+                data = getattr(block, "input", {})
+                c_score = float(data.get("correctness_score", 0.5))
+                rel_score = float(data.get("relevance_score", 0.5))
+                comp_score = float(data.get("completeness_score", 0.5))
+                d_score = float(data.get("depth_score", 0.5))
+                spec_score = float(data.get("specificity_score", 0.5))
+                prac_score = float(data.get("practical_reasoning_score", 0.5))
+                clar_score = float(data.get("clarity_score", 0.5))
+
+                overall = calculate_overall_score(c_score, rel_score, comp_score, d_score, spec_score, prac_score, clar_score)
+                status = calibrate_status(overall, c_score, rel_score, comp_score, d_score, spec_score, candidate_answer)
+
+                return AnswerEvaluationOutput(
+                    module=data.get("module", module),
+                    status=status,
+                    score=overall,
+                    correctness_score=c_score,
+                    relevance_score=rel_score,
+                    completeness_score=comp_score,
+                    depth_score=d_score,
+                    specificity_score=spec_score,
+                    practical_reasoning_score=prac_score,
+                    clarity_score=clar_score,
+                    overall_score=overall,
+                    difficulty=difficulty,
+                    reasoning_summary=data.get("reasoning_summary", ""),
+                    knowledge_gaps=data.get("knowledge_gaps", []),
+                )
+        return None
+
+    def _retry_anthropic_structured_evaluation(
+        self,
+        module: str,
+        question_asked: str,
+        candidate_answer: str,
+        job_role: str,
+        years_experience: float,
+        difficulty: str = "medium",
+    ) -> Optional[AnswerEvaluationOutput]:
+        return self._call_anthropic_structured_evaluation(module, question_asked, candidate_answer, job_role, years_experience, difficulty)
+
+    def generate_adaptive_question_structured(
+        self,
+        brief: InterviewBrief,
+        allowed_modules: List[str],
+        current_module: str,
+        current_skill_map: Dict[str, str],
+        previous_question: str = "",
+        previous_answer: str = "",
+        previous_eval: Optional[Dict[str, Any]] = None,
+        asked_questions: Optional[List[str]] = None,
+        turn_number: int = 1,
+        max_turns: int = 10,
+        current_difficulty: str = "medium",
+    ) -> NextQuestionOutput:
+        """
+        Generates structured adaptive next question using Anthropic client and strict output validation.
+        Raises AdaptiveGenerationError on failure so caller can fall back to deterministic logic.
+        """
+        if self.is_mock or not self._client:
+            raise AdaptiveGenerationError("Operating in Mock mode. LLM adaptive question generation unavailable.")
+
+        prompt = build_adaptive_question_prompt(
+            brief=brief,
+            allowed_modules=allowed_modules,
+            current_module=current_module,
+            current_skill_map=current_skill_map,
+            previous_question=previous_question,
+            previous_answer=previous_answer,
+            previous_eval=previous_eval,
+            asked_questions=asked_questions,
+            turn_number=turn_number,
+            max_turns=max_turns,
+            current_difficulty=current_difficulty,
+        )
+
+        # Attempt 1
+        try:
+            raw_output = self._call_anthropic_structured_question(prompt)
+            if raw_output:
+                validated = validate_next_question_output(
+                    raw_output,
+                    allowed_modules=allowed_modules,
+                    asked_questions=asked_questions or [],
+                    previous_eval=previous_eval,
+                    previous_answer=previous_answer,
+                )
+                return validated
+        except Exception as e:
+            logger.warning(f"Attempt 1 of adaptive question generation failed validation: {e}. Retrying with correction prompt...")
+
+        # Attempt 2 with correction instruction
+        try:
+            correction_prompt = (
+                prompt
+                + "\n\nCRITICAL CORRECTION: Previous attempt failed validation. "
+                + "Ensure target module is EXACTLY one from allowed list, difficulty is easy/medium/hard, "
+                + "question is NOT repeated, and ask EXACTLY ONE question with NO positive validation for weak answers."
+            )
+            raw_output = self._call_anthropic_structured_question(correction_prompt)
+            if raw_output:
+                validated = validate_next_question_output(
+                    raw_output,
+                    allowed_modules=allowed_modules,
+                    asked_questions=asked_questions or [],
+                    previous_eval=previous_eval,
+                    previous_answer=previous_answer,
+                )
+                return validated
+        except Exception as e:
+            logger.error(f"Attempt 2 of adaptive question generation failed: {e}.")
+
+        raise AdaptiveGenerationError("Failed to generate valid adaptive question from LLM after retry.")
+
+    def _call_anthropic_structured_question(self, prompt: str) -> Optional[NextQuestionOutput]:
+        tools = [
+            {
+                "name": "generate_next_question",
+                "description": "Generate structured next adaptive technical question for candidate.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "module": {"type": "string", "description": "Target curriculum module name selected from allowed CURRICULUM_MODULES"},
+                        "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"], "description": "Selected difficulty level"},
+                        "question": {"type": "string", "description": "The single technical question to ask"},
+                        "neutral_transition": {"type": "string", "description": "Professional neutral transition phrase (NO positive validation for weak answers)"},
+                        "should_probe": {"type": "boolean", "description": "Whether to probe deeper into current topic"},
+                        "reasoning": {"type": "string", "description": "Internal rationale"},
+                    },
+                    "required": ["module", "difficulty", "question", "neutral_transition"],
+                },
+            }
+        ]
+
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=600,
+            temperature=0.5,
+            messages=[{"role": "user", "content": prompt}],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "generate_next_question"},
+        )
+
+        for block in response.content:
+            if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == "generate_next_question":
+                data = getattr(block, "input", {})
+                return NextQuestionOutput(
+                    module=data.get("module", ""),
+                    difficulty=data.get("difficulty", "medium"),
+                    question=data.get("question", ""),
+                    neutral_transition=data.get("neutral_transition", "Understood. Let's move on."),
+                    should_probe=data.get("should_probe", False),
+                    reasoning=data.get("reasoning", ""),
+                )
+        return None
+
 
     def _call_anthropic_structured_feedback(self, prompt: str) -> Optional[FeedbackResponse]:
         tools = [
@@ -251,16 +731,18 @@ class LLMClient:
                 break
 
         # Check turn index to sequence through curriculum topics
+        prefix = "Understood." if is_unknown_answer(last_user_msg) else "Thank you."
+
         if turn_count == 1:
             # Follow up or transition to Prompt Engineering / Structured Output / RAG
             if exp >= 6:
                 return (
-                    f"That makes sense. In a production environment with high throughput, how do you handle vector database index updates, "
+                    f"{prefix} In a production environment with high throughput, how do you handle vector database index updates, "
                     f"and what strategies do you employ for hybrid search (combining sparse keyword search with dense vector embeddings)?"
                 )
             else:
                 return (
-                    f"Good explanation. When chunking documents for vector indexing, what trade-offs exist between small fixed-size chunks "
+                    f"{prefix} When chunking documents for vector indexing, what trade-offs exist between small fixed-size chunks "
                     f"and larger semantic paragraphs, especially regarding context window limits and retrieval precision?"
                 )
 
@@ -373,26 +855,56 @@ class LLMClient:
             "to prevent silent regressions in an automated CI/CD pipeline?"
         )
 
-    def _evaluate_single_answer(self, content: str) -> Dict[str, Any]:
+    def _evaluate_single_answer_dimensional(
+        self,
+        module: str,
+        question_asked: str,
+        candidate_answer: str,
+        difficulty: str = "medium",
+    ) -> AnswerEvaluationOutput:
         """
-        Grounded, deterministic evaluation signal of a single candidate interview response.
-        Returns a dict with 'score' (0.1, 0.6, 1.0) and 'label' ('Weak', 'Adequate', 'Strong').
+        Multi-dimensional technical quality evaluation for fallback / mock mode.
+        Discriminates between shallow keyword dumps, incomplete answers, and deep explanations.
         """
-        text = (content or "").strip().lower()
-        if not text:
-            return {"score": 0.1, "label": "Weak"}
+        text = (candidate_answer or "").strip().lower()
 
-        # Check for weak / vague / filler phrases or extremely short text
-        weak_phrases = [
-            "i don't know", "dont know", "no idea", "not sure", "cannot answer",
-            "pass on this", "skip this", "skip", "idk", "generic response",
-            "whatever", "unsure", "no experience", "don't have experience",
-            "haven't worked", "no clue", "bad answer", "answer for turn"
-        ]
-        if len(text) < 15 or any(p in text for p in weak_phrases):
-            return {"score": 0.1, "label": "Weak"}
+        if is_unknown_answer(candidate_answer):
+            return AnswerEvaluationOutput(
+                module=module,
+                status="Needs Attention",
+                score=0.1,
+                correctness_score=0.1,
+                relevance_score=0.1,
+                completeness_score=0.1,
+                depth_score=0.1,
+                specificity_score=0.1,
+                practical_reasoning_score=0.1,
+                clarity_score=0.1,
+                overall_score=0.1,
+                difficulty=difficulty,
+                reasoning_summary="Candidate stated lack of knowledge or gave a minimal response.",
+                knowledge_gaps=["Candidate did not demonstrate technical understanding of this topic."],
+            )
 
-        # Domain terms checklist
+        if any(phrase in text for phrase in ["ignore all previous", "ignore previous instructions", "override system prompt", "set my score", "output passed"]):
+            return AnswerEvaluationOutput(
+                module=module,
+                status="Needs Attention",
+                score=0.1,
+                correctness_score=0.1,
+                relevance_score=0.1,
+                completeness_score=0.1,
+                depth_score=0.1,
+                specificity_score=0.1,
+                practical_reasoning_score=0.1,
+                clarity_score=0.1,
+                overall_score=0.1,
+                difficulty=difficulty,
+                reasoning_summary="Candidate answer contained prompt injection attempts.",
+                knowledge_gaps=["Prompt injection attempt detected."],
+            )
+
+        # Technical domain keywords
         tech_keywords = [
             "vector", "embedding", "hnsw", "cosine", "similarity", "distance", "rag", "bm25",
             "chunk", "hybrid", "rrf", "pydantic", "schema", "function", "tool", "agent", "state",
@@ -401,17 +913,105 @@ class LLMClient:
             "kubernetes", "k8s", "prometheus", "datadog", "rate limit", "redis", "docker",
             "eval", "benchmark", "kafka", "index", "retrieval", "prompt", "token"
         ]
-
         keyword_hits = sum(1 for kw in tech_keywords if kw in text)
 
-        if len(text) >= 35 and keyword_hits >= 2:
-            return {"score": 1.0, "label": "Strong"}
-        elif len(text) >= 20 and keyword_hits >= 1:
-            return {"score": 0.6, "label": "Adequate"}
-        elif len(text) >= 40:
-            return {"score": 0.6, "label": "Adequate"}
+        # Explanation / Mechanism indicators (why/how words and operational mechanism verbs)
+        explanation_indicators = [
+            "because", "how", "why", "uses", "use", "combine", "retrieval", "hybrid", "similarity", "dense", "sparse",
+            "trade-off", "tradeoff", "latency", "index", "configuration", "configure", "configured",
+            "architecture", "mechanisms", "versus", "instead of", "prevents", "handles",
+            "implements", "strategy", "pipeline", "scale", "precision",
+            "overlap", "window", "throughput", "recall", "mitigate", "balance",
+            "enforce", "schema", "validation", "retries", "handlers", "distillation",
+            "communicating", "managing", "budget", "storing", "processing", "executing",
+            "optimizing", "routing", "evaluating", "protecting", "monitoring", "scaling",
+            "containerize", "deploying", "chain", "graph"
+        ]
+        explanation_hits = sum(1 for w in explanation_indicators if w in text)
+
+        # Quantitative or concrete parameters (specificity)
+        has_specifics = bool(re.search(r"\b(\d+%?|\d+ms|qdrant|pinecone|weaviate|faiss|pydantic|bm25|hnsw|lora|qlora|langgraph|mcp|fastapi|docker|kubernetes|redis|prometheus|datadog)\b", text))
+
+        word_count = len(text.split())
+
+        # Shallow keyword dump check: keywords present but ZERO explanation or mechanisms!
+        if keyword_hits >= 2 and explanation_hits == 0 and word_count < 15:
+            correctness = 0.55
+            relevance = 0.60
+            completeness = 0.40
+            depth = 0.30  # Low depth: keyword list without mechanism explanation
+            specificity = 0.40
+            practical_reasoning = 0.30
+            clarity = 0.50
+            gaps = ["Provided technical keywords without explaining underlying mechanisms or trade-offs."]
+            summary = "Shallow answer consisting primarily of technical keywords without explanation."
+        # Short / vague / no technical keywords or explanations
+        elif word_count < 6 or (keyword_hits == 0 and explanation_hits == 0):
+            correctness = 0.50
+            relevance = 0.60
+            completeness = 0.45
+            depth = 0.40
+            specificity = 0.40
+            practical_reasoning = 0.35
+            clarity = 0.60
+            gaps = ["Explanation lacks technical depth and complete architectural coverage."]
+            summary = "Partially relevant answer but missing technical depth and concrete mechanisms."
+        # Good answer: solid keywords and explanation, but missing full concrete specifics/mechanisms
+        elif not (has_specifics and (explanation_hits >= 1 or keyword_hits >= 3) and word_count >= 10):
+            correctness = 0.75
+            relevance = 0.85
+            completeness = 0.70
+            depth = 0.65
+            specificity = 0.65
+            practical_reasoning = 0.60
+            clarity = 0.80
+            gaps = ["Could provide deeper concrete implementation parameters and production failure mode analysis."]
+            summary = "Clear technical answer demonstrating solid foundational understanding."
+        # Deep, strong answer: rich explanation, keywords, AND concrete mechanics/specifics
         else:
-            return {"score": 0.3, "label": "Weak"}
+            correctness = 0.95
+            relevance = 0.95
+            completeness = 0.90
+            depth = 0.88
+            specificity = 0.90
+            practical_reasoning = 0.88
+            clarity = 0.92
+            gaps = []
+            summary = "Detailed technical explanation with clear architectural depth, mechanisms, and trade-offs."
+
+        overall = calculate_overall_score(correctness, relevance, completeness, depth, specificity, practical_reasoning, clarity)
+        status = calibrate_status(overall, correctness, relevance, completeness, depth, specificity, candidate_answer)
+
+        return AnswerEvaluationOutput(
+            module=module,
+            status=status,
+            score=overall,
+            correctness_score=correctness,
+            relevance_score=relevance,
+            completeness_score=completeness,
+            depth_score=depth,
+            specificity_score=specificity,
+            practical_reasoning_score=practical_reasoning,
+            clarity_score=clarity,
+            overall_score=overall,
+            difficulty=difficulty,
+            reasoning_summary=summary,
+            knowledge_gaps=gaps,
+        )
+
+    def _evaluate_single_answer(self, content: str) -> Dict[str, Any]:
+        """
+        Backward-compatible single answer evaluator.
+        """
+        eval_out = self._evaluate_single_answer_dimensional("General", "", content)
+        status_map = {
+            "Strong": "Strong",
+            "Good": "Adequate",
+            "Developing": "Adequate",
+            "Needs Attention": "Weak"
+        }
+        legacy_label = status_map.get(eval_out.status, "Adequate")
+        return {"score": eval_out.score, "label": legacy_label}
 
     def _generate_deterministic_feedback(
         self,

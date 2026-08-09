@@ -80,4 +80,15 @@ class InterviewState:
     # Per-turn skill evaluations: [{module: str, status: str}, ...]
     # Each entry corresponds to one candidate answer turn.
     turn_skill_evals: List[Dict[str, str]] = field(default_factory=list)
+    # Adaptive state tracking
+    asked_questions: List[str] = field(default_factory=list)
+    module_probe_counts: Dict[str, int] = field(default_factory=dict)
+    current_module: str = "Embeddings & Vector Search"
+    current_difficulty: str = "medium"
+    last_evaluation: Optional[Dict[str, Any]] = None
+    # Cumulative evidence tracking per module:
+    # {module_name: {"module": str, "evaluations": [str], "scores": [float], "probe_count": int, "latest_status": str, "cumulative_score": float, "average_score": float, "cumulative_status": str}}
+    module_assessments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
 
