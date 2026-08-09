@@ -978,6 +978,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // PART 14 — INPUT SHORTCUTS & EVENT LISTENERS
   function setupEventListeners() {
+    const btnOnboardingStart = document.getElementById('btn-onboarding-start');
+    if (btnOnboardingStart) {
+      btnOnboardingStart.addEventListener('click', () => {
+        if (!selectedCandidate && candidates.length > 0) {
+          selectCandidate(candidates[0]);
+        }
+        startInterview();
+      });
+    }
+
     candidateSearch.addEventListener('input', (e) => {
       const q = e.target.value.toLowerCase().trim();
       const filtered = candidates.filter(c => {

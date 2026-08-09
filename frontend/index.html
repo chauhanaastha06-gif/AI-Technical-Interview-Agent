@@ -47,10 +47,55 @@
       
       <!-- SCREEN 1: Candidate Selection Dashboard -->
       <section id="selection-screen" class="view-screen active">
+        <!-- Onboarding Hero Banner -->
+        <div class="onboarding-hero-card" id="onboarding-hero">
+          <div class="onboarding-hero-top">
+            <div class="onboarding-title-group">
+              <span class="onboarding-pill">HACKATHON DEMO</span>
+              <h1 class="onboarding-title">AI Technical Interview Agent</h1>
+              <p class="onboarding-subtitle">Adaptive AI-powered technical assessment with real-time skill evaluation.</p>
+            </div>
+            <div class="onboarding-hero-action">
+              <button id="btn-onboarding-start" class="btn btn-primary btn-lg onboarding-cta-btn" aria-label="Start Technical Interview">
+                Start Technical Interview &rarr;
+              </button>
+            </div>
+          </div>
+
+          <div class="onboarding-steps-grid">
+            <div class="onboarding-step-card">
+              <div class="step-badge">1</div>
+              <div class="step-info">
+                <h4>Select Candidate</h4>
+                <p>Choose a candidate profile to calibrate role depth & technical background.</p>
+              </div>
+            </div>
+            <div class="onboarding-step-card">
+              <div class="step-badge">2</div>
+              <div class="step-info">
+                <h4>Answer Questions</h4>
+                <p>Respond to dynamic, adaptive AI-generated technical prompts in real time.</p>
+              </div>
+            </div>
+            <div class="onboarding-step-card">
+              <div class="step-badge">3</div>
+              <div class="step-info">
+                <h4>Skill Profile & Report</h4>
+                <p>Track live skill coverage mapping and receive an evidence-based final assessment.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="onboarding-footer-note">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span><strong>How it works:</strong> The AI interviewer dynamically adapts questions based on your answers, evaluates technical depth and correctness, tracks skill coverage, and generates an evidence-based final assessment.</span>
+          </div>
+        </div>
+
         <div class="dashboard-top-bar">
           <div class="dashboard-title-block">
-            <h1>AI Technical Assessment</h1>
-            <p>Select a candidate to begin an AI-assisted technical interview.</p>
+            <h2>Candidate Roster</h2>
+            <p>Select a candidate profile below or click "Start Technical Interview" to launch immediately.</p>
           </div>
           <div class="search-box">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
